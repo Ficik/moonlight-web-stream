@@ -27,7 +27,7 @@ actix-ws = "0.4.0"
 
 # Moonlight
 # Make sure to keep the ubrn.config.yaml repo the same as this
-moonlight-common = { git = "https://github.com/MrCreativ3001/moonlight-common-rust.git", rev = "d6fd16f90cd298a081800788f072e457defac1a6", features = [
+moonlight-common = { git = "https://github.com/Ficik/moonlight-common-rust.git", rev = "dc89fbe8cad4ae717f17f6beb167a928d8c2dddb", features = [
     "tokio",
     "tokio-hyper",
     "rustcrypto",
@@ -71,3 +71,16 @@ windows-sys = { version = "0.61.2", features = ["Win32_System_Console"] }
 too_many_arguments = "allow"
 unwrap_used = "warn"
 todo = "warn"
+
+# Keep application code debuggable while avoiding minute-long RSA pairing and
+# slow password verification in an otherwise unoptimized development build.
+[profile.dev.package.num-bigint-dig]
+opt-level = 3
+[profile.dev.package.rsa]
+opt-level = 3
+[profile.dev.package.sha2]
+opt-level = 3
+[profile.dev.package.pbkdf2]
+opt-level = 3
+[profile.dev.package.hmac]
+opt-level = 3

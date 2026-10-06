@@ -1,8 +1,8 @@
 # Docs: https://jhugman.github.io/uniffi-bindgen-react-native/reference/config-yaml.html
 
 rust:
-  repo: https://github.com/MrCreativ3001/moonlight-common-rust.git
-  branch: d6fd16f90cd298a081800788f072e457defac1a6
+  repo: https://github.com/Ficik/moonlight-common-rust.git
+  branch: dc89fbe8cad4ae717f17f6beb167a928d8c2dddb
   manifestPath: bindings/Cargo.toml
 
 web:
