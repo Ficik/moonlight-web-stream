@@ -1,3 +1,4 @@
+import { ClipboardChannel } from "../clipboard"
 import { ClientInputEvent, ControlPacket, ControlPacketConfig, controlPacketConfigNew, ServerType, VideoFormats } from "../../uniffi/moonlight_common_bindings"
 import { AudioPlayer, AudioPlayerSetup, TrackAudioPlayer } from "../audio/index"
 import { StreamCapabilities } from "../index"
@@ -74,6 +75,8 @@ export function generateControlPacketConfig(): ControlPacketConfig {
 }
 
 export interface IControlStream {
+    clipboard?: ClipboardChannel
+
     send(input: ClientInputEvent): void
     sendRaw(packet: ControlPacket): void
 

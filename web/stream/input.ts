@@ -119,28 +119,62 @@ export class StreamInput {
 
     onKeyDown(event: KeyboardEvent) {
         this.sendKeyEvent(true, event)
+        if (!event.repeat && (event.ctrlKey || event.metaKey) && (event.code === "KeyC" || event.code === "KeyX")) {
+            this.controlStream?.clipboard?.requestRemote()
+        }
     }
     onKeyUp(event: KeyboardEvent) {
         this.sendKeyEvent(false, event)
     }
 
     onPaste(event: ClipboardEvent) {
+        event.preventDefault()
+        if (event.clipboardData?.types.includes("text/plain")) {
+            void this.pasteText(event.clipboardData.getData("text/plain"))
+        }
+    }
 
-        const data = event.clipboardData
-        if (!data) {
+    async pasteLocal(shift = false) {
+        // Release physical modifiers before asynchronous browser permission prompts.
+        this.raiseAllKeys()
+        try {
+            const text = await navigator.clipboard.readText()
+            await this.pasteText(text, shift)
+        } catch {
+            showNotification("Allow clipboard access to paste. HTTPS or localhost is required.", "warn")
+        }
+    }
+
+    copyRemoteClipboard() {
+        if (!this.controlStream?.clipboard) {
+            showNotification("Clipboard sharing requires WebRTC transport", "warn")
             return
         }
+        void this.controlStream.clipboard.copyRemote()
+    }
 
-        console.debug("PASTE", data)
-
-        const text = data.getData("text/plain")
-        if (text) {
-            console.debug("PASTE TEXT", text)
-
-            // Before sending text raise all keys
-            this.raiseAllKeys()
-
-            this.sendText(text)
+    private async pasteText(text: string, shift = false) {
+        const control = this.controlStream
+        this.raiseAllKeys()
+        try {
+            if (!control?.clipboard) throw new Error("Clipboard sharing requires WebRTC transport")
+            await control.clipboard.setText(text)
+            if (this.controlStream !== control) return
+            // One normal paste shortcut after the host acknowledges clipboard ownership.
+            // Raw keyboard packets use the reliable ordered control channel.
+            const modifiers = { ...emptyKeyModifiers(), ctrl: true, shift }
+            const key = (code: number, down: boolean, state = modifiers) => control.sendRaw(new ControlPacket.Keyboard({
+                action: down ? KeyAction.Down : KeyAction.Up,
+                flags: { sunshineNonNormalized: false }, keyCode: code, modifiers: state, zero: 0
+            }))
+            key(0xA2, true)
+            if (shift) key(0xA0, true)
+            key(0x56, true)
+            key(0x56, false)
+            if (shift) key(0xA0, false)
+            key(0xA2, false, emptyKeyModifiers())
+        } catch (error) {
+            showNotification(error instanceof Error ? error.message : "Clipboard transfer failed", "warn")
         }
     }
 
@@ -197,29 +231,7 @@ export class StreamInput {
         }))
     }
     sendText(text: string) {
-        const MAX_CHUNK_LENGTH = 30
-
-        const encoder = new TextEncoder()
-
-        let currentChunk: Array<number> = []
-        const sendChunk = () =>
-            this.controlStream?.sendRaw(new ControlPacket.Text({
-                text: new Uint8Array(currentChunk).buffer
-            }))
-
-        for (const char of text) {
-            const bytes = encoder.encode(char)
-
-            if (currentChunk.length + bytes.byteLength > MAX_CHUNK_LENGTH) {
-                sendChunk()
-                currentChunk = []
-            }
-            currentChunk.push(...bytes)
-        }
-
-        if (currentChunk.length > 0) {
-            sendChunk()
-        }
+        void this.pasteText(text)
     }
 
     // -- Mouse

@@ -37,9 +37,11 @@ pub async fn webrtc_loop(
     mut control_channel: ControlChannel,
     mut on_data_channel: mpsc::UnboundedReceiver<Arc<dyn DataChannel>>,
     handler: &WebRtcHandler,
+    clipboard_host: Arc<moonlight_common::high::tokio::MoonlightHost<crate::app::RequestClient>>,
 ) -> Result<(), AppError> {
     info!("started main webrtc loop");
 
+    let mut clipboard_task = None;
     let mut last_key_states_sequence_number = 0;
     let mut last_key_states = CompactKeyStates::default();
 
@@ -78,6 +80,15 @@ pub async fn webrtc_loop(
                 let label = data_channel.label().await?;
                 debug!(data_channel = ?label, "got data channel");
 
+                if label == "moonlight.clipboard.v1" && clipboard_task.is_none() {
+                    let host = clipboard_host.clone();
+                    clipboard_task = Some(crate::api::stream::clipboard::ClipboardTask(tokio::spawn(async move {
+                        if let Err(_) = crate::api::stream::clipboard::run(data_channel, host).await {
+                            warn!("clipboard channel closed or unavailable");
+                        }
+                    })));
+                    continue;
+                }
                 if control_channel.try_add_channel(&label, &data_channel) {
                     continue;
                 }

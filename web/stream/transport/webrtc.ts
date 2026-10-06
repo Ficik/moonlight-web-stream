@@ -1,9 +1,9 @@
+import { ClipboardChannel } from "../clipboard"
 import { Api, fetchApi, WebRTCAnswer } from "../../api"
-import { StreamKeys } from "../../api_bindings"
-import { ActiveGamepads, ClientInputEvent, ClientInputEvent_Tags, ControlPacket, ControlPacketConfig, controlPacketDeserialize, controlPacketSerialize, KeyAction, keyStatesCanStore, keyStatesEmpty, keyStatesSetPressed, MouseButton, MouseButtonAction, PacketDirection, VideoFormats, WebRtcSessionAnswer, webrtcSessionAnswerParse, WebRtcSessionOffer, webrtcSessionOfferApply } from "../../uniffi/moonlight_common_bindings"
+import { ActiveGamepads, ClientInputEvent, ClientInputEvent_Tags, ControlPacket, ControlPacketConfig, controlPacketDeserialize, controlPacketSerialize, PacketDirection, VideoFormats, WebRtcSessionAnswer, webrtcSessionAnswerParse, WebRtcSessionOffer, webrtcSessionOfferApply } from "../../uniffi/moonlight_common_bindings"
 import { globalObject, wait } from "../../util"
 import { AudioPlayer, TrackAudioPlayer } from "../audio/index"
-import { I16_MAX, U16_MAX, U8_MAX } from "../buffer"
+import { I16_MAX, U8_MAX } from "../buffer"
 import { createControllerPacketBitflags } from "../gamepad"
 import { Logger } from "../log"
 import { DataPipe } from "../pipeline/pipes"
@@ -376,6 +376,8 @@ export class WebRTCTransport implements Transport {
 }
 
 class WebRtcControlStream implements IControlStream {
+    readonly clipboard: ClipboardChannel
+
 
     private logger?: Logger
 
@@ -384,8 +386,6 @@ class WebRtcControlStream implements IControlStream {
     private channel: RTCDataChannel | null = null
     private mouseAbsolute: RTCDataChannel
     private mouse: RTCDataChannel
-    private keysCompact: RTCDataChannel
-    private keys: RTCDataChannel
     private touch: RTCDataChannel
     private controller: RTCDataChannel
 
@@ -394,12 +394,9 @@ class WebRtcControlStream implements IControlStream {
         { x: number, y: number, referenceWidth: number, referenceHeight: number } |
         { moveX: number, moveY: number }
         = { moveX: 0, moveY: 0 }
+    private mousePending = false
     private mouseScrollX = 0
     private mouseScrollY = 0
-
-    private remoteKeyStates: Set<number> = new Set()
-    private currentPressedKeys: Set<number> = new Set()
-    private keyStatesSequenceNumber = 0
 
     private controllerStates: Array<boolean> = []
 
@@ -407,6 +404,8 @@ class WebRtcControlStream implements IControlStream {
     private packetBuffer: Array<ControlPacket> = []
 
     constructor(peer: RTCPeerConnection, logger?: Logger) {
+        this.clipboard = new ClipboardChannel(peer)
+
         this.logger = logger
 
         for (let i = 0; i < 16; i++) {
@@ -425,15 +424,6 @@ class WebRtcControlStream implements IControlStream {
         })
         this.mouse.bufferedAmountLowThreshold = this.maxBufferedAmount(this.mouse)
 
-        this.keysCompact = peer.createDataChannel("moonlight.control.keysCompact", {
-            ordered: false,
-            maxRetransmits: 0,
-        })
-        this.keysCompact.bufferedAmountLowThreshold = this.maxBufferedAmount(this.keysCompact)
-
-        this.keys = peer.createDataChannel("moonlight.control.keys")
-        this.keys.bufferedAmountLowThreshold = this.maxBufferedAmount(this.keys)
-
         this.touch = peer.createDataChannel("moonlight.control.touch")
         this.touch.bufferedAmountLowThreshold = this.maxBufferedAmount(this.touch)
 
@@ -451,8 +441,6 @@ class WebRtcControlStream implements IControlStream {
         switch (channel) {
             case this.mouseAbsolute:
             case this.mouse:
-            case this.keysCompact:
-            case this.keys:
                 return 512
             case this.controller:
                 return 4 * 512
@@ -515,6 +503,7 @@ class WebRtcControlStream implements IControlStream {
         let controllerNumber
         switch (input.tag) {
             case ClientInputEvent_Tags.MouseMoveAbsolute:
+                this.mousePending = true
                 this.mouseState = {
                     x: input.inner.x,
                     y: input.inner.y,
@@ -523,6 +512,7 @@ class WebRtcControlStream implements IControlStream {
                 }
                 break
             case ClientInputEvent_Tags.MouseMoveRelative:
+                this.mousePending = true
                 if ("moveX" in this.mouseState) {
                     this.mouseState.moveX += input.inner.deltaX
                     this.mouseState.moveY += input.inner.deltaY
@@ -540,43 +530,31 @@ class WebRtcControlStream implements IControlStream {
                 this.mouseScrollX += input.inner.scrollX
                 break
             case ClientInputEvent_Tags.MouseButton:
-                let keyCode = null
-                switch (input.inner.button) {
-                    case MouseButton.Left:
-                        keyCode = StreamKeys.VK_LBUTTON
-                        break
-                    case MouseButton.Middle:
-                        keyCode = StreamKeys.VK_MBUTTON
-                        break
-                    case MouseButton.Right:
-                        keyCode = StreamKeys.VK_RBUTTON
-                        break
-                    case MouseButton.X1:
-                        keyCode = StreamKeys.VK_XBUTTON1
-                        break
-                    case MouseButton.X2:
-                        keyCode = StreamKeys.VK_XBUTTON2
-                        break
+                // Deliver the position before the click on the same ordered
+                // channel. Lost button transitions break selection/double-click.
+                if ("x" in this.mouseState) {
+                    this.sendRaw(new ControlPacket.MouseMoveAbsolute({
+                        ...this.mouseState, unused: 0,
+                    }))
+                } else if (this.mouseState.moveX !== 0 || this.mouseState.moveY !== 0) {
+                    this.sendRaw(new ControlPacket.MouseMoveRelative({
+                        deltaX: this.mouseState.moveX, deltaY: this.mouseState.moveY,
+                    }))
+                    this.mouseState = { moveX: 0, moveY: 0 }
                 }
-
-                if (keyCode) {
-                    if (input.inner.action == MouseButtonAction.Press) {
-                        this.currentPressedKeys.add(keyCode)
-                    } else {
-                        this.currentPressedKeys.delete(keyCode)
-                    }
-                }
-
-                this.sendKeysCompact()
+                this.mousePending = false
+                this.sendRaw(new ControlPacket.MouseButton(input.inner))
                 break
             case ClientInputEvent_Tags.Keyboard:
-                if (input.inner.action == KeyAction.Down) {
-                    this.currentPressedKeys.add(input.inner.keyCode)
-                } else {
-                    this.currentPressedKeys.delete(input.inner.keyCode)
-                }
-
-                this.sendKeysCompact()
+                // Desktop shortcuts are transitions, not replaceable snapshots.
+                // The unordered, non-retransmitted compact channel can lose a
+                // complete press or deliver C before its Ctrl/Shift modifiers.
+                // Keep key down/up and the acknowledged paste shortcut on the
+                // same reliable ordered channel, preserving event modifiers.
+                this.sendRaw(new ControlPacket.Keyboard({
+                    ...input.inner,
+                    zero: 0,
+                }))
                 break
             case ClientInputEvent_Tags.ControllerConnect:
                 controllerNumber = input.inner.controllerNumber % 16
@@ -689,7 +667,11 @@ class WebRtcControlStream implements IControlStream {
         }
 
         // Try to send packets
-        for (const packet of this.packetBuffer.splice(0)) {
+        while (this.packetBuffer.length > 0) {
+            // Backpressure must delay reliable key/button transitions, never
+            // discard them. bufferedamountlow resumes this queue.
+            if (this.channel.bufferedAmount > this.maxBufferedAmount(this.channel)) return
+            const packet = this.packetBuffer.shift()!
             this.trySendOn(this.channel, packet)
         }
     }
@@ -702,7 +684,7 @@ class WebRtcControlStream implements IControlStream {
         globalObject().requestAnimationFrame(this.boundSendBatchedInputs)
 
         // -- Send mouse
-        if ("x" in this.mouseState) {
+        if (this.mousePending && "x" in this.mouseState) {
             this.trySendOn(this.mouseAbsolute, new ControlPacket.MouseMoveAbsolute({
                 x: this.mouseState.x,
                 y: this.mouseState.y,
@@ -710,7 +692,7 @@ class WebRtcControlStream implements IControlStream {
                 referenceHeight: this.mouseState.referenceHeight,
                 unused: 0,
             }))
-        } else {
+        } else if (this.mousePending && "moveX" in this.mouseState) {
             const notChanged = this.mouseState.moveX == 0 && this.mouseState.moveY == 0
             const changed = !notChanged
 
@@ -726,6 +708,9 @@ class WebRtcControlStream implements IControlStream {
                 moveY: 0,
             }
         }
+        // An idle viewer must not continually move the host pointer back to
+        // its last position while another viewer/operator is selecting text.
+        this.mousePending = false
 
         // -- Send Mouse Scroll
         if (this.mouseScrollX != 0) {
@@ -743,76 +728,6 @@ class WebRtcControlStream implements IControlStream {
             this.mouseScrollY = 0
         }
 
-        this.sendKeysCompact()
-    }
-
-    private sendKeysCompact() {
-        // Get key modifiers for sending reliable keys as fallback
-        let modifiers = { alt: false, ctrl: false, meta: false, shift: false }
-        if (this.currentPressedKeys.has(StreamKeys.VK_SHIFT) || this.currentPressedKeys.has(StreamKeys.VK_LSHIFT) || this.currentPressedKeys.has(StreamKeys.VK_RSHIFT)) {
-            modifiers.shift = true
-        }
-        if (this.currentPressedKeys.has(StreamKeys.VK_LWIN) || this.currentPressedKeys.has(StreamKeys.VK_RWIN)) {
-            modifiers.meta = true
-        }
-        if (this.currentPressedKeys.has(StreamKeys.VK_CONTROL) || this.currentPressedKeys.has(StreamKeys.VK_LCONTROL) || this.currentPressedKeys.has(StreamKeys.VK_RCONTROL)) {
-            modifiers.ctrl = true
-        }
-        if (this.currentPressedKeys.has(StreamKeys.VK_MENU) || this.currentPressedKeys.has(StreamKeys.VK_LMENU) || this.currentPressedKeys.has(StreamKeys.VK_RMENU)) {
-            modifiers.alt = true
-        }
-
-        let keyStates = keyStatesEmpty()
-
-        // Go through pressed keys
-        for (const key of this.currentPressedKeys) {
-            if (keyStatesCanStore(keyStates, key)) {
-                keyStates = keyStatesSetPressed(keyStates, key, KeyAction.Down)
-            } else {
-                // only send reliable key press if the host doesn't know about it
-                if (this.remoteKeyStates.has(key)) {
-                    continue
-                }
-
-                this.trySendOn(this.keys, new ControlPacket.Keyboard({
-                    action: KeyAction.Down,
-                    flags: { sunshineNonNormalized: false },
-                    keyCode: key,
-                    modifiers,
-                    zero: 0,
-                }))
-
-                this.remoteKeyStates.add(key)
-            }
-        }
-
-        // Make a copy to not delete while iterating
-        const remoteKeyStates = [...this.remoteKeyStates]
-
-        for (const key of remoteKeyStates) {
-            if (!this.currentPressedKeys.has(key) && !keyStatesCanStore(keyStates, key)) {
-                this.trySendOn(this.keys, new ControlPacket.Keyboard({
-                    action: KeyAction.Up,
-                    flags: { sunshineNonNormalized: false },
-                    keyCode: key,
-                    modifiers,
-                    zero: 0,
-                }))
-
-                this.remoteKeyStates.delete(key)
-            }
-        }
-
-        // Send key states
-        this.trySendOn(this.keysCompact, new ControlPacket.WebState({
-            sequenceNumber: this.keyStatesSequenceNumber,
-            keys: keyStates
-        }))
-
-        if (this.keyStatesSequenceNumber >= U16_MAX - 1) {
-            this.keyStatesSequenceNumber = 0
-        }
-        this.keyStatesSequenceNumber += 1
     }
 
     private getControllerMask(): ActiveGamepads {

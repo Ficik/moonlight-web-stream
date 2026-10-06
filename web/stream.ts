@@ -412,8 +412,9 @@ class ViewerApp implements Component {
         this.onUserInteraction()
 
         console.debug(event)
-        if (event.shiftKey && event.ctrlKey && event.code == "KeyV") {
-            // We are likely pasting -> don't send keys
+        if ((event.ctrlKey || event.metaKey) && event.code == "KeyV") {
+            event.preventDefault()
+            if (!event.repeat) void this.stream.getInput().pasteLocal(event.shiftKey)
         } else if (event.code == "F11") {
             // Allow manual fullscreen
         } else {
@@ -1016,6 +1017,15 @@ class ViewerSidebar implements Component, Sidebar, ScreenKeyboardListener {
 
         this.buttonDiv.classList.add("sidebar-stream-buttons")
         this.div.appendChild(this.buttonDiv)
+
+        const copyClipboard = document.createElement("button")
+        copyClipboard.textContent = "Copy remote clipboard"
+        copyClipboard.addEventListener("click", () => this.app.getStream()?.getInput().copyRemoteClipboard())
+        this.buttonDiv.appendChild(copyClipboard)
+        const pasteClipboard = document.createElement("button")
+        pasteClipboard.textContent = "Paste local clipboard"
+        pasteClipboard.addEventListener("click", () => { void this.app.getStream()?.getInput().pasteLocal() })
+        this.buttonDiv.appendChild(pasteClipboard)
 
         // Send keycode
         this.sendKeycodeButton.innerText = I.stream.sendKeycode

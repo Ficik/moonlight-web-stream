@@ -9,6 +9,7 @@ use moonlight_common::{
 
 use crate::api::bindings::StreamPermissions;
 
+pub mod clipboard;
 pub mod web_socket;
 pub mod webrtc;
 
