@@ -93,6 +93,8 @@ export class WebRTCTransport implements Transport {
         }
 
         this.location = response.location
+        // Gathering can finish before the WHEP POST returns its session URL.
+        void this.sendIceCandidates()
 
         this.sdpAnswer = webrtcSessionAnswerParse(response.answerSdp)
         this.logger?.debug(`Server responded with extensions ${JSON.stringify(this.sdpAnswer)}`)
@@ -165,6 +167,8 @@ export class WebRTCTransport implements Transport {
     // -- Trickle Ice
     private iceCandidateSendTimer: number | null = null
     private pendingIceCandidates: Array<string> = []
+    private sendingIceCandidates = false
+    private iceSenderClosed = false
     private onIceCandidate(event: RTCPeerConnectionIceEvent) {
         if (!event.candidate) {
             // Ice Gathering finished
@@ -180,29 +184,36 @@ export class WebRTCTransport implements Transport {
 
     private boundSendIceCandidates = this.sendIceCandidates.bind(this)
     private async sendIceCandidates() {
-        this.iceCandidateSendTimer = null
         if (this.iceCandidateSendTimer != null) {
             globalObject().clearTimeout(this.iceCandidateSendTimer)
+            this.iceCandidateSendTimer = null
+        }
+        if (this.iceSenderClosed || this.sendingIceCandidates) {
+            return
         }
 
-        for (const candidate of this.pendingIceCandidates) {
-            this.logger?.debug(`sending ice candidate: ${candidate}`)
-        }
-
-        if (this.location && this.pendingIceCandidates.length > 0) {
-            const trickleIceSdpFrag = this.pendingIceCandidates.map(x => `a=${x}`).join("\r\n")
-
-            await fetchApi(this.api, this.location, "PATCH", {
-                noUrlModify: true,
-                trickleIceSdpFrag,
-                response: "ignore",
-            })
-
-            this.pendingIceCandidates = []
-        }
-
-        if (this.peer.iceGatheringState != "complete") {
-            this.iceCandidateSendTimer = globalObject().setTimeout(this.boundSendIceCandidates, 2000)
+        this.sendingIceCandidates = true
+        try {
+            if (this.location && this.pendingIceCandidates.length > 0) {
+                // Detach this batch so candidates arriving during the PATCH survive.
+                const candidates = this.pendingIceCandidates.splice(0)
+                try {
+                    await fetchApi(this.api, this.location, "PATCH", {
+                        noUrlModify: true,
+                        trickleIceSdpFrag: candidates.map(x => `a=${x}`).join("\r\n"),
+                        response: "ignore",
+                    })
+                } catch (error) {
+                    this.pendingIceCandidates.unshift(...candidates)
+                    this.logger?.debug(`Failed to send ICE candidates; will retry: ${error}`)
+                }
+            }
+        } finally {
+            this.sendingIceCandidates = false
+            if (!this.iceSenderClosed && (this.peer.iceGatheringState != "complete"
+                || (this.location != null && this.pendingIceCandidates.length > 0))) {
+                this.iceCandidateSendTimer = globalObject().setTimeout(this.boundSendIceCandidates, 2000)
+            }
         }
     }
 
@@ -276,6 +287,7 @@ export class WebRTCTransport implements Transport {
     }
 
     async close(): Promise<void> {
+        this.iceSenderClosed = true
         // Close the peer
         this.peer.close()
 

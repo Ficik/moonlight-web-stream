@@ -41,6 +41,7 @@ jobs:
         run: |
           cargo install wasm-bindgen-cli --version 0.2.128 --locked
           npm ci
+          node --test tests/*.test.cjs
           npm run build
           npx tsc --noEmit
       - name: Build gateway

@@ -71,6 +71,7 @@ mod convert;
 mod ext_color_space;
 mod forward_interceptor;
 mod ice_servers;
+mod nat;
 mod stream;
 mod video;
 
@@ -625,6 +626,9 @@ pub async fn webrtc_post(
     // Append additional data to the response
     let mut answer_sdp =
         Session::parse(answer.sdp.as_bytes()).expect("failed to get parse sdp answer");
+    if let Some(mapping) = app.config().webrtc.nat_1to1.as_ref() {
+        nat::apply_nat_1to1(&mut answer_sdp, mapping);
+    }
     let additional_answer = WebRTCSessionAnswer {
         app_name: app_title,
         microphone: false,
